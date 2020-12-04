@@ -4,3 +4,8 @@
 - cuda 9.0
 - cudnn 7005
 - transformers
+
+### task type
+- EMOTION
+- NLI
+- NER

@@ -4,6 +4,7 @@
 
 __author__ = 'yp'
 
+import json
 import torch
 import time
 import random
@@ -11,12 +12,8 @@ import datetime
 import numpy as np
 import torch.nn as nn
 import pandas as pd
-from config import train_file_1
 from torch.utils.data import TensorDataset
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from sklearn.model_selection import train_test_split
-from torch.nn.modules.loss import MSELoss
-from torch.nn import CrossEntropyLoss
 from transformers import BertTokenizer
 from transformers import RobertaConfig
 from transformers import BertConfig
@@ -30,80 +27,139 @@ from transformers import BertPreTrainedModel
 from transformers import BertForQuestionAnswering
 from transformers import AdamW
 from transformers import get_linear_schedule_with_warmup
+from config import model_path, train_file_4
 
 
-def load_train_data(train_file_path):
-    train_df_1 = pd.read_csv(train_file_1, header=None, sep='\t', index_col=0)
-    train_df_1.columns = ['text', 'label']
-    label_map = dict(zip(train_df_1['label'].value_counts().index,
-                         range(len(train_df_1['label'].value_counts()))))
-    train_df_1['label'] = train_df_1[['label']].applymap(lambda x: label_map[x])
-    train_df_1, test_df = train_test_split(train_df_1, test_size=0.2)
-    pass
+label_dict = {'疾病和诊断': 1, '影像检查': 3,
+              '解剖部位': 5, '手术': 7, '药物': 9, '实验室检验': 11}
+label_map_reverse = {
+    0: 'O',
+    1: 'B-disease',
+    2: 'I-disease',
+    3: 'B-check',
+    4: 'I-check',
+    5: 'B-part',
+    6: 'I-part',
+    7: 'B-operation',
+    8: 'I-operation',
+    9: 'B-drug',
+    10: 'I-drug',
+    11: 'B-assay',
+    12: 'I-assay',
+}
 
 
-def load_encode_module():
-    pass
+def transform_entities_to_label(text, entities, sep_sentence):
+    """
+    原文，实体，wwm ===> 标签(支持词组encode)
+    :param text: originalText
+    :param entities: [{"start_pos": 10, "end_pos": 13, "label_type": "疾病和诊断"}]
+    :param sep_sentence: [word, word]
+    :return: [0, 0, 1, 0]
+    """
+    char_label = np.array([0 for i in range(len(text))])
+    out = np.array([0 for i in range(100)])
+
+    for i in entities:
+        char_label[i["start_pos"]:i["end_pos"]] = label_dict[i["label_type"]]
+        char_label[i["end_pos"] - 1] = label_dict[i["label_type"]] + 1
+
+    current_idx = 0
+    pad_num = 0
+    while '<pad>' in sep_sentence:
+        sep_sentence.remove("<pad>")
+        pad_num += 1
+
+    for i, j in enumerate(sep_sentence[1:-2]):
+        out[i + pad_num + 1] = max(char_label[current_idx:current_idx + len(j)])
+
+        if j == "<unk>":
+            current_idx = current_idx + 1
+        else:
+            current_idx = current_idx + len(j)
+
+    return out.tolist()
 
 
+def load_train_data(train_file_path, model_file_path, is_sequence, sentence_max_length):
+    config = BertConfig.from_pretrained(model_file_path)
+    tokenizer = BertTokenizer.from_pretrained(model_file_path)
 
-train_df_1 = pd.read_csv(train_file_1, header=None, sep='\t', index_col=0)
-train_df_1.columns = ['text', 'label']
-label_map = dict(zip(train_df_1['label'].value_counts().index,
-                     range(len(train_df_1['label'].value_counts()))))
-train_df_1['label'] = train_df_1[['label']].applymap(lambda x: label_map[x])
-train_df_1, test_df = train_test_split(train_df_1, test_size=0.2)
+    train_input_ids, train_attention_masks = [], []
 
-model_name = "D:/model_file/hfl_chinese-roberta-wwm-ext"
+    if not is_sequence:
+        train_df = pd.read_csv(train_file_path, header=None, sep='\t', index_col=0)
+        train_df.columns = ['text', 'label']
 
-rob_config = RobertaConfig.from_json_file("D:/model_file/hfl_chinese-roberta-wwm-ext/config.json")
-rob_config.num_labels = len(label_map)
-tokenizer = BertTokenizer.from_pretrained(model_name)
+        label_map = dict(zip(train_df['label'].value_counts().index,
+                             range(len(train_df['label'].value_counts()))))
+        config.num_labels = len(label_map)
+        train_df['label'] = train_df[['label']].applymap(lambda x: label_map[x])
+        train_sentences = train_df[['text']].values
+        train_labels = train_df.label.values
+        data_size = train_sentences.shape[0]
 
-train_sentences_1 = train_df_1.text.values
-train_labels_1 = train_df_1.label.values
+        for sent in train_sentences:
+            encoded_dict = tokenizer.encode_plus(
+                text=sent[0],
+                text_pair=None,
+                add_special_tokens=True,
+                max_length=sentence_max_length,
+                pad_to_max_length=True,
+                return_attention_mask=True,
+                return_tensors='pt',
+            )
+            train_input_ids.append(encoded_dict['input_ids'])
+            train_attention_masks.append(encoded_dict['attention_mask'])
 
-test_sentences_1 = test_df.text.values
-test_labels_1 = test_df.label.values
+    else: #
+        # todo 检查编码错位的情况
+        train_labels = []
+        with open(train_file_path, mode="r", encoding="utf-8") as f1:
+            for line in f1.readlines():
+                data = json.loads(line.strip())
 
-train_input_ids, test_input_ids = [], []
-train_attention_masks, test_attention_masks = [], []
+                originalText = data["originalText"]
+                entities = data["entities"]
 
-for sent in train_sentences_1:
-    encoded_dict = tokenizer.encode_plus(
-        text=sent,  # Sentence to encode.
-        add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
-        max_length=100,  # Pad & truncate all sentences.
-        pad_to_max_length=True,
-        return_attention_mask=True,  # Construct attn. masks.
-        return_tensors='pt',  # Return pytorch tensors.
-    )
-    train_input_ids.append(encoded_dict['input_ids'])
-    train_attention_masks.append(encoded_dict['attention_mask'])
+                encoded_dict = tokenizer.encode_plus(
+                    originalText,
+                    text_pair=None,
+                    add_special_tokens=True,
+                    max_length=sentence_max_length,
+                    pad_to_max_length=True,
+                    return_attention_mask=True,
+                    return_tensors='pt',
+                )
+                input_ids = encoded_dict['input_ids']
+                sep_sentence = tokenizer.convert_ids_to_tokens(input_ids[0], skip_special_tokens=False)
+                seq_lab = transform_entities_to_label(originalText, entities, sep_sentence)
+                labels = torch.tensor(seq_lab).unsqueeze(0)
 
-for sent in test_sentences_1:
-    encoded_dict = tokenizer.encode_plus(
-        text=sent,  # Sentence to encode.
-        add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
-        max_length=100,  # Pad & truncate all sentences.
-        pad_to_max_length=True,
-        return_attention_mask=True,  # Construct attn. masks.
-        return_tensors='pt',  # Return pytorch tensors.
-    )
-    test_input_ids.append(encoded_dict['input_ids'])
-    test_attention_masks.append(encoded_dict['attention_mask'])
+                train_attention_masks.append(encoded_dict["attention_mask"])
+                train_input_ids.append(input_ids)
+                train_labels.append(labels)
+        data_size = len(train_labels)
 
-train_input_ids = torch.cat(train_input_ids, dim=0)
-train_attention_masks = torch.cat(train_attention_masks, dim=0)
-train_labels_1 = torch.tensor(train_labels_1)
+    # 数据切分
+    train_input_ids = torch.cat(train_input_ids, dim=0)
+    train_attention_masks = torch.cat(train_attention_masks, dim=0)
+    train_labels = torch.cat(train_labels, dim=0)
+    train_size = 8 * data_size // 10
 
-test_input_ids = torch.cat(test_input_ids, dim=0)
-test_attention_masks = torch.cat(test_attention_masks, dim=0)
-test_labels_1 = torch.tensor(test_labels_1)
+    train_dataset = TensorDataset(train_input_ids, train_attention_masks, train_labels)
+    train_dataset, test_dataset = torch.utils.data.random_split(train_dataset,
+                                                                [train_size, data_size - train_size])
 
-# Combine the training inputs into a TensorDataset.
-train_dataset = TensorDataset(train_input_ids, train_attention_masks, train_labels_1)
-test_dataset = TensorDataset(test_input_ids, test_attention_masks, test_labels_1)
+    model = BertForSequenceClassification(config=config)
+    model.cuda()
+
+    return train_dataset, test_dataset, model
+
+
+train_dataset, test_dataset, model = load_train_data(train_file_4, model_path,
+                                                     is_sequence=True, sentence_max_length=100)
+
 
 batch_size = 8
 
@@ -118,9 +174,6 @@ test_dataloader = DataLoader(
     sampler=SequentialSampler(test_dataset),  # Pull out batches sequentially.
     batch_size=batch_size  # Evaluate with this batch size.
 )
-
-model = BertForSequenceClassification(config=rob_config)
-model.cuda()
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
