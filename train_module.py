@@ -49,7 +49,31 @@ label_map_reverse = {
 }
 
 
-def transform_entities_to_label(text, entities, sep_sentence):
+def process_text(text):
+    text = text.replace("Ⅰ", '一')
+    text = text.replace("Ⅱ", '二')
+    text = text.replace("Ⅲ", '三')
+    text = text.replace("Ⅳ", '四')
+    text = text.replace("Ⅴ", '五')
+    text = text.replace("Ⅵ", '六')
+    text = text.replace("Ⅶ", '七')
+    text = text.replace("Ⅷ", '八')
+    text = text.replace("Ⅸ", '九')
+    text = text.replace("Ⅹ", '十')
+    text = text.replace("℃", "度")
+    text = text.replace("㎝", "m")
+    text = text.replace("㎡", "m")
+    text = text.replace("“", "\"")
+    text = text.replace("”", "\"")
+    text = text.replace("缬", "结")
+    text = text.replace("冸", "泮")
+    text = text.replace("莨", "良")
+    text = text.replace("菪", "宕")
+
+    return text
+
+
+def transform_entities_to_label(text, entities, sep_sentence, sentence_max_length):
     """
     原文，实体，wwm ===> 标签(支持词组encode)
     :param text: originalText
@@ -58,7 +82,7 @@ def transform_entities_to_label(text, entities, sep_sentence):
     :return: [0, 0, 1, 0]
     """
     char_label = np.array([0 for i in range(len(text))])
-    out = np.array([0 for i in range(100)])
+    out = np.array([0 for i in range(sentence_max_length)])
 
     for i in entities:
         char_label[i["start_pos"]:i["end_pos"]] = label_dict[i["label_type"]]
@@ -87,7 +111,8 @@ def load_train_data(train_file_path, model_file_path, is_sequence, sentence_max_
 
     train_input_ids, train_attention_masks = [], []
 
-    if not is_sequence:
+    if not is_sequence:  # 分类
+        # TODO 句对分类
         train_df = pd.read_csv(train_file_path, header=None, sep='\t', index_col=0)
         train_df.columns = ['text', 'label']
 
@@ -112,14 +137,14 @@ def load_train_data(train_file_path, model_file_path, is_sequence, sentence_max_
             train_input_ids.append(encoded_dict['input_ids'])
             train_attention_masks.append(encoded_dict['attention_mask'])
 
-    else: #
-        # todo 检查编码错位的情况
+    else:  # 序列标注
+        config.num_labels = len(label_map_reverse)
         train_labels = []
         with open(train_file_path, mode="r", encoding="utf-8") as f1:
             for line in f1.readlines():
                 data = json.loads(line.strip())
 
-                originalText = data["originalText"]
+                originalText = process_text(data["originalText"])
                 entities = data["entities"]
 
                 encoded_dict = tokenizer.encode_plus(
@@ -133,7 +158,8 @@ def load_train_data(train_file_path, model_file_path, is_sequence, sentence_max_
                 )
                 input_ids = encoded_dict['input_ids']
                 sep_sentence = tokenizer.convert_ids_to_tokens(input_ids[0], skip_special_tokens=False)
-                seq_lab = transform_entities_to_label(originalText, entities, sep_sentence)
+                seq_lab = transform_entities_to_label(originalText, entities, sep_sentence,
+                                                      sentence_max_length=sentence_max_length)
                 labels = torch.tensor(seq_lab).unsqueeze(0)
 
                 train_attention_masks.append(encoded_dict["attention_mask"])
@@ -151,14 +177,16 @@ def load_train_data(train_file_path, model_file_path, is_sequence, sentence_max_
     train_dataset, test_dataset = torch.utils.data.random_split(train_dataset,
                                                                 [train_size, data_size - train_size])
 
-    model = BertForSequenceClassification(config=config)
+    # model = BertForSequenceClassification(config=config)  # 文本分类
+    model = BertForTokenClassification(config=config)  # 序列标注
     model.cuda()
 
     return train_dataset, test_dataset, model
 
 
+# 数据处理
 train_dataset, test_dataset, model = load_train_data(train_file_4, model_path,
-                                                     is_sequence=True, sentence_max_length=100)
+                                                     is_sequence=True, sentence_max_length=50)
 
 
 batch_size = 8
